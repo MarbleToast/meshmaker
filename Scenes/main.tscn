@@ -1,13 +1,31 @@
-[gd_scene load_steps=3 format=3 uid="uid://dhffc1wkr2bjd"]
+[gd_scene load_steps=6 format=3 uid="uid://dhffc1wkr2bjd"]
 
+[ext_resource type="Material" uid="uid://dxy24xgram2yh" path="res://Shaders/wireframe.tres" id="1_8gbba"]
 [ext_resource type="Script" uid="uid://db1ni4brf4at8" path="res://pipe.gd" id="1_jjgbg"]
+[ext_resource type="Script" uid="uid://dcsja3lej743x" path="res://Scenes/camera_3d.gd" id="2_bo1nx"]
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_jjgbg"]
-cull_mode = 2
+[sub_resource type="Environment" id="Environment_8gbba"]
+background_mode = 1
+background_color = Color(0.650128, 0.650128, 0.650128, 1)
+ambient_light_source = 2
+ambient_light_color = Color(0.860369, 0.860369, 0.860369, 1)
+
+[sub_resource type="SphereMesh" id="SphereMesh_jjvhh"]
+material = ExtResource("1_8gbba")
 
 [node name="Node3D" type="Node3D"]
 
 [node name="MeshInstance3D" type="MeshInstance3D" parent="."]
-transform = Transform3D(0.01, 0, 0, 0, 0.01, 0, 0, 0, 0.01, 0, 0, 0)
-material_override = SubResource("StandardMaterial3D_jjgbg")
+transform = Transform3D(0.1, 0, 0, 0, 0.1, 0, 0, 0, 0.1, 0, 0, 0)
+material_override = ExtResource("1_8gbba")
+cast_shadow = 0
 script = ExtResource("1_jjgbg")
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(-4.37114e-08, 0, 1, 0, 1, 0, -1, 0, -4.37114e-08, 1, 0, 0)
+environment = SubResource("Environment_8gbba")
+script = ExtResource("2_bo1nx")
+
+[node name="TestSphere" type="MeshInstance3D" parent="."]
+visible = false
+mesh = SubResource("SphereMesh_jjvhh")

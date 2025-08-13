@@ -1,0 +1,11 @@
+[gd_resource type="ShaderMaterial" load_steps=2 format=3 uid="uid://dxy24xgram2yh"]
+
+[ext_resource type="Shader" uid="uid://c3mtr2f0ryhxp" path="res://Shaders/wireframe.gdshader" id="1_b0p2v"]
+
+[resource]
+render_priority = 0
+shader = ExtResource("1_b0p2v")
+shader_parameter/albedo = Color(1, 1, 1, 1)
+shader_parameter/wire_color = Color(0.470076, 0.470076, 0.470076, 1)
+shader_parameter/wire_width = 0.0
+shader_parameter/wire_smoothness = 0.01
