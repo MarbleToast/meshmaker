@@ -2,13 +2,33 @@ extends MeshInstance3D
 
 const THICKNESS_MODIFIER := 25
 
+var mesh_export_thread: Thread = Thread.new()
+var slices: Array[Dictionary] = []
+var edges: Array[Array] = []
+
 func _ready() -> void:
 	mesh = build_mesh_from_csv_streaming(
 		"res://Data/survey.csv",
 		"res://Data/apertures.csv"
 	)
+	OBJExporter.export_progress_updated.connect(func (sid: int, prog: float): print("Exporting surface %s, %.02d/100 complete." % [sid, prog * 100]))
+	OBJExporter.export_completed.connect(func (_obj, _mtl): print("Export complete!"))
 
-# --- Utility: parse one slice line -> center + euler (radians) ---
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey:
+		if event.keycode == KEY_M and event.pressed and not event.echo:
+			_export_mesh()
+
+
+func _export_mesh() -> void:
+	mesh_export_thread.start(OBJExporter.save_mesh_to_files.bind($"../MeshInstance3D".mesh, "user://", "lhc"))
+
+
+func _exit_tree() -> void:
+	mesh_export_thread.wait_to_finish()
+
+
 func _parse_slice_line(line: PackedStringArray) -> Dictionary:
 	if line.size() < 7:
 		return {}
@@ -20,7 +40,6 @@ func _parse_slice_line(line: PackedStringArray) -> Dictionary:
 	}
 
 
-# --- Utility: one CSV step for edges -> Array[Vector2] ---
 func _parse_edge_line(line: PackedStringArray) -> Array[Vector2]:
 	var points: Array[Vector2] = []
 	if line.size() < 5:
@@ -42,7 +61,6 @@ func _parse_edge_line(line: PackedStringArray) -> Array[Vector2]:
 	return points
 
 
-# --- Streaming version with proper state management ---
 func build_mesh_from_csv_streaming(slices_path: String, edges_path: String) -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -57,15 +75,13 @@ func build_mesh_from_csv_streaming(slices_path: String, edges_path: String) -> A
 	sf.get_csv_line()
 	ef.get_csv_line()
 
-	# State for streaming processing
-	var has_prev := false
+	var has_prev: bool = false
 	var prev_slice: Dictionary = {}
 	var prev_verts: Array[Vector3] = []
-	
-	var triangle_count := 0
-	var slice_count := 0
+	var prev_tangent: Vector3 = Vector3.FORWARD
+	var triangle_count: int = 0
+	var prev_angle_offset: float = 0.0
 
-	# Process each slice as we read it
 	while not sf.eof_reached() and not ef.eof_reached():
 		var sf_line := sf.get_csv_line()
 		var ef_line := ef.get_csv_line()
@@ -80,86 +96,115 @@ func build_mesh_from_csv_streaming(slices_path: String, edges_path: String) -> A
 		# Skip invalid data
 		if curr_slice.size() == 0 or curr_edges.size() == 0:
 			continue
-			
-		slice_count += 1
 		
-		# Calculate frame for current slice
+		# Give it up for Frenet frames (because using Basis.from_euler() kept giving me shearing)
 		var curr_center = curr_slice.center
 		var tangent: Vector3
 		var normal: Vector3
 		var binormal: Vector3
 		
 		if has_prev:
-			# Use direction from previous slice
-			tangent = (curr_center - prev_slice.center).normalized()
+			tangent = curr_center - prev_slice.center
 		else:
-			# For first slice, use forward direction or derive from data
-			tangent = Vector3.FORWARD
+			tangent = prev_tangent
 		
-		# Ensure valid tangent
 		if tangent.length_squared() < 1e-12:
-			tangent = Vector3.FORWARD
+			tangent = prev_tangent
 		
-		# Calculate perpendicular frame
 		var up = Vector3.UP
 		if abs(tangent.dot(up)) > 0.9:
 			up = Vector3.RIGHT
+
 		normal = (up - tangent * up.dot(tangent)).normalized()
 		binormal = tangent.cross(normal).normalized()
 		
-		# Apply roll if present
 		if "psi" in curr_slice and abs(curr_slice.psi) > 1e-6:
 			normal = normal.rotated(tangent, curr_slice.psi)
 			binormal = binormal.rotated(tangent, curr_slice.psi)
+			
+		prev_tangent = tangent
 		
-		# Build current slice vertices
+		slices.append(curr_slice)
+		
 		var curr_verts: Array[Vector3] = []
 		curr_verts.resize(curr_edges.size())
 		for i in curr_edges.size():
 			var p2 = curr_edges[i] * THICKNESS_MODIFIER
 			curr_verts[i] = curr_center + normal * p2.x + binormal * p2.y
 		
-		# Create triangles if we have a previous slice
+		edges.append(curr_verts)
+		
+		# Rotation minimisation to stop the classic Frenet twisting
+		if has_prev and prev_verts.size() == curr_verts.size():
+			var num_verts = prev_verts.size()
+
+			var prev_center = prev_slice.center
+			var curr_center_calc = curr_slice.center
+
+			# Reference vectors: first vertex relative to ring center
+			var ref_prev = (prev_verts[0] - prev_center).normalized()
+			var ref_curr = (curr_verts[0] - curr_center_calc).normalized()
+
+			# Tangent from positions
+			var tangent_dir = (curr_center_calc - prev_center).normalized()
+			if tangent_dir.length_squared() < 1e-12:
+				tangent_dir = prev_tangent.normalized()
+
+			# Measure signed rotation around tangent
+			var dot_val = clamp(ref_prev.dot(ref_curr), -1.0, 1.0)
+			var cross_val = tangent_dir.dot(ref_prev.cross(ref_curr))
+			var angle_diff = atan2(cross_val, dot_val)
+
+			# Accumulate roll
+			prev_angle_offset += angle_diff
+
+			# Convert to vertex index shift
+			var index_shift = int(round(prev_angle_offset / (TAU / num_verts)))
+
+			# Apply index rotation
+			var rotated_ring: Array[Vector3] = []
+			rotated_ring.resize(num_verts)
+			for i in num_verts:
+				rotated_ring[i] = curr_verts[(i + index_shift) % num_verts]
+
+			curr_verts = rotated_ring
+		
+		# Stitch slices if we have a previous slice to connect polygons to
 		if has_prev and prev_verts.size() == curr_verts.size() and curr_verts.size() > 2:
-			var N = curr_verts.size()
+			var num_verts = curr_verts.size()
 			
-			for j in N:
-				var jn = (j + 1) % N
-				var v1 = prev_verts[j]    # Previous slice, current point
-				var v2 = curr_verts[j]    # Current slice, current point
-				var v1n = prev_verts[jn]  # Previous slice, next point
-				var v2n = curr_verts[jn]  # Current slice, next point
+			for j in num_verts:
+				var jn = (j + 1) % num_verts
+				var v1 = prev_verts[j] # Previous slice, current point
+				var v2 = curr_verts[j] # Current slice, current point
+				var v1n = prev_verts[jn] # Previous slice, next point
+				var v2n = curr_verts[jn] # Current slice, next point
 				
-				# Triangle 1: v1 -> v1n -> v2 (counter-clockwise from outside)
 				st.add_vertex(v1)
 				st.add_vertex(v1n)
 				st.add_vertex(v2)
 				
-				# Triangle 2: v1n -> v2n -> v2 (counter-clockwise from outside)
 				st.add_vertex(v1n)
 				st.add_vertex(v2n)
 				st.add_vertex(v2)
-				
+
 				triangle_count += 2
 		
-		# Update state for next iteration
 		prev_slice = curr_slice
 		prev_verts = curr_verts
 		has_prev = true
 
-	sf.close()
-	ef.close()
 	
-	print("Streaming: Processed ", slice_count, " slices, generated ", triangle_count, " triangles")
+	print(
+		"Mesh complete. Processed %s apertures, generated %s vertices and %s polygons." % 
+			[slices.size(), edges.reduce(func (acc, cur): return acc + cur.size(), 0), triangle_count]
+	)
 	
-	if triangle_count == 0:
-		print("Warning: No triangles generated")
-		return ArrayMesh.new()
-	
+	st.index()
 	st.generate_normals()
 	return st.commit()
 
-# --- CSV parsing helper ---
+
 func _marshall_python_array_to_godot_array(arr_str: String) -> Array:
 	arr_str = arr_str.strip_edges().trim_prefix("[").trim_suffix("]")
 	var result: Array = []

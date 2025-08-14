@@ -15,10 +15,18 @@ run/main_scene="uid://dhffc1wkr2bjd"
 config/features=PackedStringArray("4.4", "GL Compatibility")
 config/icon="res://icon.svg"
 
+[autoload]
+
+OBJExporter="*res://addons/obj_exporter/OBJExporter.tscn"
+
 [display]
 
 window/size/viewport_width=1920
 window/size/viewport_height=1080
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/obj_exporter/plugin.cfg")
 
 [rendering]
 

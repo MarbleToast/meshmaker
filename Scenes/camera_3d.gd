@@ -27,6 +27,7 @@ var _e = false
 var _shift = false
 var _alt = false
 
+
 func _input(event):
 	# Receives mouse motion
 	if event is InputEventMouseMotion:
@@ -58,10 +59,12 @@ func _input(event):
 			KEY_E:
 				_e = event.pressed
 
+
 # Updates mouselook and movement every frame
 func _process(delta):
 	_update_mouselook()
 	_update_movement(delta)
+
 
 # Updates camera movement
 func _update_movement(delta):
