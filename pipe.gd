@@ -1,43 +1,77 @@
 extends MeshInstance3D
 
-const THICKNESS_MODIFIER := 25
+@export var aperture_material: Material
+@export var beam_material: Material
 
-var mesh_export_thread: Thread = Thread.new()
-var slices: Array[Dictionary] = []
-var edges: Array[Array] = []
+const APERTURE_THICKNESS_MODIFIER := 25
 
-func _ready() -> void:
-	mesh = build_mesh_from_csv_streaming(
-		"res://Data/survey.csv",
-		"res://Data/apertures.csv"
-	)
-	OBJExporter.export_progress_updated.connect(func (sid: int, prog: float): print("Exporting surface %s, %.02d/100 complete." % [sid, prog * 100]))
-	OBJExporter.export_completed.connect(func (_obj, _mtl): print("Export complete!"))
+const BEAM_FUDGED_EMITTANCE_X := 1e-8
+const BEAM_FUDGED_EMITTANCE_Y := 1e-8
+const BEAM_NUM_SIGMAS := 3
+const BEAM_SIGMA_DELTA := 8e-4
+const BEAM_ELLIPSE_RESOLUTION := 4
+const BEAM_THICKNESS_MODIFIER := 1
 
+signal aperture_mesh_ready(arrays: Array)
+signal beam_mesh_ready(arrays: Array)
 
-func _input(event: InputEvent) -> void:
-	if event is InputEventKey:
-		if event.keycode == KEY_M and event.pressed and not event.echo:
-			_export_mesh()
+var mesh_export_thread := Thread.new()
+var aperture_thread := Thread.new()
+var beam_thread := Thread.new()
 
 
 func _export_mesh() -> void:
-	mesh_export_thread.start(OBJExporter.save_mesh_to_files.bind($"../MeshInstance3D".mesh, "user://", "lhc"))
+	mesh_export_thread.start(OBJExporter.save_mesh_to_files.bind(mesh, "user://", "lhc_beam"))
 
 
-func _exit_tree() -> void:
-	mesh_export_thread.wait_to_finish()
+func _marshall_python_array_to_godot_array(arr_str: String) -> Array:
+	arr_str = arr_str.strip_edges().trim_prefix("[").trim_suffix("]")
+	var result: Array = []
+	if arr_str == "":
+		return result
+	
+	for num_str in arr_str.split(","):
+		num_str = num_str.strip_edges()
+		if num_str == "None" or num_str == "":
+			result.append(null)
+		else:
+			result.append(str_to_var(num_str))
+	return result
 
 
 func _parse_slice_line(line: PackedStringArray) -> Dictionary:
 	if line.size() < 7:
 		return {}
 	return {
-		"center": Vector3(float(line[1]), float(line[2]), float(line[3])),
-		"theta":  deg_to_rad(float(line[4])),
-		"phi":    deg_to_rad(float(line[5])),
-		"psi":    deg_to_rad(float(line[6])),
+		center = Vector3(float(line[1]), float(line[2]), float(line[3])),
+		psi = deg_to_rad(float(line[6])),
 	}
+
+
+func _parse_twiss_line(line: PackedStringArray) -> Dictionary:
+	if line.size() < 7:
+		return {}
+	
+	return {
+		position = Vector2(float(line[3]), float(line[5])),
+		sigma = Vector2(
+			BEAM_SIGMA_DELTA * BEAM_NUM_SIGMAS * sqrt(BEAM_FUDGED_EMITTANCE_X * float(line[17])) + absf(float(line[23])),
+			BEAM_SIGMA_DELTA * BEAM_NUM_SIGMAS * sqrt(BEAM_FUDGED_EMITTANCE_Y * float(line[18])) + absf(float(line[25]))
+		)
+	}
+
+
+func _create_ellipse(twiss: Dictionary) -> Array[Vector2]:
+	var pts: Array[Vector2] = []
+	var center: Vector2 = twiss.position
+	var sigma: Vector2 = twiss.sigma
+	var step := TAU / float(BEAM_ELLIPSE_RESOLUTION)
+	
+	for i in BEAM_ELLIPSE_RESOLUTION:
+		var angle := i * step
+		pts.append(center + Vector2(cos(angle) * sigma.x, sin(angle) * sigma.y))
+
+	return pts
 
 
 func _parse_edge_line(line: PackedStringArray) -> Array[Vector2]:
@@ -61,160 +95,190 @@ func _parse_edge_line(line: PackedStringArray) -> Array[Vector2]:
 	return points
 
 
-func build_mesh_from_csv_streaming(slices_path: String, edges_path: String) -> ArrayMesh:
+func _load_slices(survey_path: String) -> Array[Dictionary]:
+	var sf := FileAccess.open(survey_path, FileAccess.READ)
+	
+	# Skip header
+	sf.get_csv_line()
+	
+	var apertures: Array[Dictionary] = []
+	while not sf.eof_reached():
+		var slice_line := sf.get_csv_line()
+		if len(slice_line) < 5:
+			continue
+			
+		var curr_slice := _parse_slice_line(slice_line)
+		if curr_slice.is_empty():
+			continue
+			
+		apertures.append(curr_slice)
+	
+	return apertures
+
+
+func _on_aperture_mesh_ready(arrays: Array):
+	print("Aperture mesh generated.")
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	mesh.surface_set_material(mesh.get_surface_count() - 1, aperture_material)
+
+
+func _on_beam_mesh_ready(arrays: Array):
+	print("Beam mesh generated.")
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	mesh.surface_set_material(mesh.get_surface_count() - 1, beam_material)
+
+
+func _exit_tree():
+	if aperture_thread.is_started():
+		aperture_thread.wait_to_finish()
+	if beam_thread.is_started():
+		beam_thread.wait_to_finish()
+	if mesh_export_thread.is_started():
+		mesh_export_thread.wait_to_finish()
+
+
+func _ready() -> void:
+	print("Loading survey data...")
+	var slices_data := _load_slices("res://Data/survey.csv")
+
+	aperture_mesh_ready.connect(_on_aperture_mesh_ready)
+	beam_mesh_ready.connect(_on_beam_mesh_ready)
+	
+	aperture_thread.start(func ():
+		var arrays := _build_sweep_mesh(
+			slices_data, 
+			"res://Data/apertures.csv", 
+			func (slice_line):
+				var data: Array[Vector2]
+				data.assign(_parse_edge_line(slice_line).map(func(v): return v * APERTURE_THICKNESS_MODIFIER))
+				return data
+		).commit_to_arrays()
+
+		aperture_mesh_ready.emit.call_deferred(arrays)
+	)
+	
+	beam_thread.start(func ():
+		var arrays := _build_sweep_mesh(
+			slices_data, 
+			"res://Data/twiss.csv", 
+			func (twiss_line):
+				var data: Array[Vector2]
+				data.assign(_create_ellipse(_parse_twiss_line(twiss_line)).map(func(v): return v * BEAM_THICKNESS_MODIFIER))
+				return data
+		).commit_to_arrays()
+
+		beam_mesh_ready.emit.call_deferred(arrays)
+	)
+
+	OBJExporter.export_progress_updated.connect(func (sid: int, prog: float): print("Exporting surface %s, %.02f/100 complete." % [sid, prog * 100]))
+	OBJExporter.export_completed.connect(func (_obj, _mtl): print("Export complete!"))
+
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey:
+		if event.keycode == KEY_M and event.pressed and not event.echo:
+			_export_mesh()
+
+
+func _build_sweep_mesh(survey_data: Array[Dictionary], data_path: String, get_points_func: Callable) -> SurfaceTool:
+	print("Building mesh from %s..." % data_path)
+	
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 
-	var sf := FileAccess.open(slices_path, FileAccess.READ)
-	var ef := FileAccess.open(edges_path, FileAccess.READ)
-	if sf == null or ef == null:
-		push_error("Could not open one or both CSV files.")
-		return ArrayMesh.new()
-
+	var df := FileAccess.open(data_path, FileAccess.READ)
+	if df == null:
+		push_error("Could not open data CSV file.")
+		return st
+		
 	# Skip headers
-	sf.get_csv_line()
-	ef.get_csv_line()
-
-	var has_prev: bool = false
-	var prev_slice: Dictionary = {}
+	df.get_csv_line()
+	
+	var aperture_index := 0
+	var has_prev := false
+	var prev_slice := {}
 	var prev_verts: Array[Vector3] = []
-	var prev_tangent: Vector3 = Vector3.FORWARD
-	var triangle_count: int = 0
-	var prev_angle_offset: float = 0.0
+	var prev_tangent := Vector3.FORWARD
+	var prev_angle_offset := 0.0
+	var triangle_count := 0
 
-	while not sf.eof_reached() and not ef.eof_reached():
-		var sf_line := sf.get_csv_line()
-		var ef_line := ef.get_csv_line()
-		
-		# Validate line lengths
-		if sf_line.size() < 7 or ef_line.size() < 5:
+	while not df.eof_reached():
+		var data_line := df.get_csv_line()
+		if data_line.size() < 5:
 			continue
-			
-		var curr_slice = _parse_slice_line(sf_line)
-		var curr_edges = _parse_edge_line(ef_line)
-		
-		# Skip invalid data
-		if curr_slice.size() == 0 or curr_edges.size() == 0:
+
+		var curr_slice := survey_data[aperture_index]
+		aperture_index += 1
+
+		# Get the 2D cross section points by calling the func
+		var points_2d: Array[Vector2] = get_points_func.call(data_line)
+		if points_2d.is_empty():
 			continue
-		
-		# Give it up for Frenet frames (because using Basis.from_euler() kept giving me shearing)
-		var curr_center = curr_slice.center
-		var tangent: Vector3
-		var normal: Vector3
-		var binormal: Vector3
-		
-		if has_prev:
-			tangent = curr_center - prev_slice.center
-		else:
-			tangent = prev_tangent
-		
+
+		# Construct frenet frame
+		var curr_center: Vector3 = curr_slice.center
+		var tangent: Vector3 = (curr_center - prev_slice.center) if has_prev else prev_tangent
 		if tangent.length_squared() < 1e-12:
 			tangent = prev_tangent
-		
-		var up = Vector3.UP
+
+		var up := Vector3.UP
 		if abs(tangent.dot(up)) > 0.9:
 			up = Vector3.RIGHT
 
-		normal = (up - tangent * up.dot(tangent)).normalized()
-		binormal = tangent.cross(normal).normalized()
-		
-		if "psi" in curr_slice and abs(curr_slice.psi) > 1e-6:
+		var normal := (up - tangent * up.dot(tangent)).normalized()
+		var binormal := tangent.cross(normal).normalized()
+		if abs(curr_slice.psi) > 1e-6:
 			normal = normal.rotated(tangent, curr_slice.psi)
 			binormal = binormal.rotated(tangent, curr_slice.psi)
-			
+
 		prev_tangent = tangent
-		
-		slices.append(curr_slice)
-		
-		var curr_verts: Array[Vector3] = []
-		curr_verts.resize(curr_edges.size())
-		for i in curr_edges.size():
-			var p2 = curr_edges[i] * THICKNESS_MODIFIER
+
+		# Build vertices in 3D space
+		var curr_verts : Array[Vector3] = []
+		curr_verts.resize(points_2d.size())
+		for i in points_2d.size():
+			var p2 := points_2d[i]
 			curr_verts[i] = curr_center + normal * p2.x + binormal * p2.y
-		
-		edges.append(curr_verts)
-		
-		# Rotation minimisation to stop the classic Frenet twisting
+
+		# Rotation minimisation
 		if has_prev and prev_verts.size() == curr_verts.size():
-			var num_verts = prev_verts.size()
-
-			var prev_center = prev_slice.center
-			var curr_center_calc = curr_slice.center
-
-			# Reference vectors: first vertex relative to ring center
-			var ref_prev = (prev_verts[0] - prev_center).normalized()
-			var ref_curr = (curr_verts[0] - curr_center_calc).normalized()
-
-			# Tangent from positions
-			var tangent_dir = (curr_center_calc - prev_center).normalized()
+			var num_verts = curr_verts.size()
+			var ref_prev = (prev_verts[0] - prev_slice.center).normalized()
+			var ref_curr = (curr_verts[0] - curr_center).normalized()
+			var tangent_dir: Vector3 = (curr_center - prev_slice.center).normalized()
 			if tangent_dir.length_squared() < 1e-12:
 				tangent_dir = prev_tangent.normalized()
 
-			# Measure signed rotation around tangent
-			var dot_val = clamp(ref_prev.dot(ref_curr), -1.0, 1.0)
+			var dot_val   = clamp(ref_prev.dot(ref_curr), -1.0, 1.0)
 			var cross_val = tangent_dir.dot(ref_prev.cross(ref_curr))
-			var angle_diff = atan2(cross_val, dot_val)
+			prev_angle_offset += atan2(cross_val, dot_val)
 
-			# Accumulate roll
-			prev_angle_offset += angle_diff
-
-			# Convert to vertex index shift
-			var index_shift = int(round(prev_angle_offset / (TAU / num_verts)))
-
-			# Apply index rotation
-			var rotated_ring: Array[Vector3] = []
+			var index_shift := int(round(prev_angle_offset / (TAU / num_verts)))
+			var rotated_ring : Array[Vector3] = []
 			rotated_ring.resize(num_verts)
 			for i in num_verts:
 				rotated_ring[i] = curr_verts[(i + index_shift) % num_verts]
-
 			curr_verts = rotated_ring
-		
-		# Stitch slices if we have a previous slice to connect polygons to
+
+		# Stitching
 		if has_prev and prev_verts.size() == curr_verts.size() and curr_verts.size() > 2:
-			var num_verts = curr_verts.size()
-			
-			for j in num_verts:
-				var jn = (j + 1) % num_verts
-				var v1 = prev_verts[j] # Previous slice, current point
-				var v2 = curr_verts[j] # Current slice, current point
-				var v1n = prev_verts[jn] # Previous slice, next point
-				var v2n = curr_verts[jn] # Current slice, next point
-				
-				st.add_vertex(v1)
-				st.add_vertex(v1n)
-				st.add_vertex(v2)
-				
-				st.add_vertex(v1n)
-				st.add_vertex(v2n)
-				st.add_vertex(v2)
+			for j in curr_verts.size():
+				var jn = (j + 1) % curr_verts.size()
+				st.add_vertex(prev_verts[j])
+				st.add_vertex(prev_verts[jn])
+				st.add_vertex(curr_verts[j])
+
+				st.add_vertex(prev_verts[jn])
+				st.add_vertex(curr_verts[jn])
+				st.add_vertex(curr_verts[j])
 
 				triangle_count += 2
-		
+
 		prev_slice = curr_slice
 		prev_verts = curr_verts
 		has_prev = true
 
-	
-	print(
-		"Mesh complete. Processed %s apertures, generated %s vertices and %s polygons." % 
-			[slices.size(), edges.reduce(func (acc, cur): return acc + cur.size(), 0), triangle_count]
-	)
-	
 	st.index()
 	st.generate_normals()
-	return st.commit()
-
-
-func _marshall_python_array_to_godot_array(arr_str: String) -> Array:
-	arr_str = arr_str.strip_edges().trim_prefix("[").trim_suffix("]")
-	var result: Array = []
-	if arr_str == "":
-		return result
-	
-	for num_str in arr_str.split(","):
-		num_str = num_str.strip_edges()
-		if num_str == "None" or num_str == "":
-			result.append(null)
-		else:
-			result.append(float(num_str))
-	return result
+	st.optimize_indices_for_cache()
+	return st

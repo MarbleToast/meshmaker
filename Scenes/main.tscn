@@ -1,30 +1,71 @@
-[gd_scene load_steps=7 format=3 uid="uid://dhffc1wkr2bjd"]
+[gd_scene load_steps=12 format=3 uid="uid://dhffc1wkr2bjd"]
 
 [ext_resource type="Material" uid="uid://dxy24xgram2yh" path="res://Shaders/wireframe.tres" id="1_8gbba"]
 [ext_resource type="Script" uid="uid://db1ni4brf4at8" path="res://pipe.gd" id="1_jjgbg"]
+[ext_resource type="Shader" uid="uid://cvh6sfsfohh6f" path="res://Shaders/hatching.gdshader" id="1_jjvhh"]
 [ext_resource type="Script" uid="uid://dcsja3lej743x" path="res://Scenes/camera_3d.gd" id="2_bo1nx"]
 
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_8gbba"]
-transparency = 1
-cull_mode = 2
-albedo_color = Color(0, 0, 0, 0.690196)
+[sub_resource type="ArrayMesh" id="ArrayMesh_jjvhh"]
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_8gbba"]
+render_priority = 0
+shader = ExtResource("1_jjvhh")
+shader_parameter/rim = 0.0
+shader_parameter/rim_threshold = 0.0
+shader_parameter/emission = 0.4
+shader_parameter/specular = 0.0
+shader_parameter/specular_color = Color(0.5, 0.5, 0.5, 1)
+shader_parameter/roughness = 1.0
+shader_parameter/alpha = 0.2
+shader_parameter/is_normal_symmetric = true
+shader_parameter/normal_scale = 1.0
+shader_parameter/albedo_color = Color(0.792157, 0.72549, 0.737255, 0.239216)
+shader_parameter/albedo_color2 = Color(0.438406, 0.438406, 0.438406, 1)
+
+[sub_resource type="ShaderMaterial" id="ShaderMaterial_jjvhh"]
+render_priority = 0
+shader = ExtResource("1_jjvhh")
+shader_parameter/rim = 0.0
+shader_parameter/rim_threshold = 0.0
+shader_parameter/emission = 0.4
+shader_parameter/specular = 0.0
+shader_parameter/specular_color = Color(0.5, 0.5, 0.5, 1)
+shader_parameter/roughness = 1.0
+shader_parameter/alpha = 0.4
+shader_parameter/is_normal_symmetric = true
+shader_parameter/normal_scale = 1.0
+shader_parameter/albedo_color = Color(0.973134, 0, 0.158268, 0.239216)
+shader_parameter/albedo_color2 = Color(0.773692, 0.177081, 0.248177, 1)
+
+[sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_jjvhh"]
+sky_top_color = Color(0.182934, 0.441454, 0.492471, 1)
+sky_horizon_color = Color(0.666667, 0.666667, 0.666667, 1)
+sky_curve = 1.0
+ground_bottom_color = Color(0.61252, 0.329557, 0.316916, 1)
+ground_horizon_color = Color(0.666667, 0.666667, 0.666667, 1)
+ground_curve = 1.0
+
+[sub_resource type="Sky" id="Sky_kry3j"]
+sky_material = SubResource("ProceduralSkyMaterial_jjvhh")
 
 [sub_resource type="Environment" id="Environment_8gbba"]
-background_mode = 1
-background_color = Color(0.650128, 0.650128, 0.650128, 1)
-ambient_light_source = 2
-ambient_light_color = Color(0.860369, 0.860369, 0.860369, 1)
+background_mode = 2
+sky = SubResource("Sky_kry3j")
+ambient_light_source = 3
+tonemap_mode = 2
 
 [sub_resource type="SphereMesh" id="SphereMesh_jjvhh"]
 material = ExtResource("1_8gbba")
 
 [node name="Node3D" type="Node3D"]
 
-[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+[node name="BeamPipe" type="MeshInstance3D" parent="."]
 transform = Transform3D(0.1, 0, 0, 0, 0.1, 0, 0, 0, 0.1, 0, 0, 0)
-material_override = SubResource("StandardMaterial3D_8gbba")
 cast_shadow = 0
+mesh = SubResource("ArrayMesh_jjvhh")
 script = ExtResource("1_jjgbg")
+aperture_material = SubResource("ShaderMaterial_8gbba")
+beam_material = SubResource("ShaderMaterial_jjvhh")
 
 [node name="Camera3D" type="Camera3D" parent="."]
 transform = Transform3D(-4.37114e-08, 0, 1, 0, 1, 0, -1, 0, -4.37114e-08, 1, 0, 0)
