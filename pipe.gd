@@ -20,11 +20,10 @@ var aperture_thread := Thread.new()
 var beam_thread := Thread.new()
 
 
-func _export_mesh() -> void:
-	mesh_export_thread.start(OBJExporter.save_mesh_to_files.bind(mesh, "user://", "lhc_beam"))
-
-
-func _marshall_python_array_to_godot_array(arr_str: String) -> Array:
+## Converts a stringified Python list to a Godot array
+##
+## Should be fairly portable for types other than floats, and converts None to null.
+func _python_list_to_godot_array(arr_str: String) -> Array:
 	arr_str = arr_str.strip_edges().trim_prefix("[").trim_suffix("]")
 	var result: Array = []
 	if arr_str == "":
@@ -39,8 +38,9 @@ func _marshall_python_array_to_godot_array(arr_str: String) -> Array:
 	return result
 
 
-func _parse_slice_line(line: PackedStringArray) -> Dictionary:
-	if line.size() < 7:
+## Parses a line of aperture data from an Xsuite survey CSV
+func _parse_aperture_line(line: PackedStringArray) -> Dictionary:
+	if len(line) < 7:
 		return {}
 	return {
 		center = Vector3(float(line[1]), float(line[2]), float(line[3])),
@@ -48,8 +48,9 @@ func _parse_slice_line(line: PackedStringArray) -> Dictionary:
 	}
 
 
+## Parses a line of beam envelope data from an Xsuite twiss CSV
 func _parse_twiss_line(line: PackedStringArray) -> Dictionary:
-	if line.size() < 7:
+	if len(line) < 7:
 		return {}
 	
 	return {
@@ -61,6 +62,7 @@ func _parse_twiss_line(line: PackedStringArray) -> Dictionary:
 	}
 
 
+## Creates an ellipse from a parsed twiss line, with width and height according to sigma in x and y
 func _create_ellipse(twiss: Dictionary) -> Array[Vector2]:
 	var pts: Array[Vector2] = []
 	var center: Vector2 = twiss.position
@@ -74,18 +76,19 @@ func _create_ellipse(twiss: Dictionary) -> Array[Vector2]:
 	return pts
 
 
+## Parses a line of aperture vertex data from an Xsuite apertures CSV
 func _parse_edge_line(line: PackedStringArray) -> Array[Vector2]:
 	var points: Array[Vector2] = []
-	if line.size() < 5:
+	if len(line) < 5:
 		return points
 		
-	var xs: Array = _marshall_python_array_to_godot_array(line[3])
-	var ys: Array = _marshall_python_array_to_godot_array(line[4])
+	var xs: Array = _python_list_to_godot_array(line[3])
+	var ys: Array = _python_list_to_godot_array(line[4])
 	
-	if xs.size() == 0 or ys.size() == 0 or xs[0] == null or ys[0] == null:
+	if len(xs) == 0 or len(ys) == 0 or xs[0] == null or ys[0] == null:
 		return points
 	
-	var n: int = min(xs.size(), ys.size())
+	var n: int = min(len(xs), len(ys))
 	points.resize(n)
 	for i in n:
 		if xs[i] != null and ys[i] != null:
@@ -95,7 +98,8 @@ func _parse_edge_line(line: PackedStringArray) -> Array[Vector2]:
 	return points
 
 
-func _load_slices(survey_path: String) -> Array[Dictionary]:
+# Reads and parses all lines from an Xsuite survey file, discarding non-usable lines
+func _load_survey(survey_path: String) -> Array[Dictionary]:
 	var sf := FileAccess.open(survey_path, FileAccess.READ)
 	
 	# Skip header
@@ -107,7 +111,7 @@ func _load_slices(survey_path: String) -> Array[Dictionary]:
 		if len(slice_line) < 5:
 			continue
 			
-		var curr_slice := _parse_slice_line(slice_line)
+		var curr_slice := _parse_aperture_line(slice_line)
 		if curr_slice.is_empty():
 			continue
 			
@@ -116,19 +120,21 @@ func _load_slices(survey_path: String) -> Array[Dictionary]:
 	return apertures
 
 
-func _on_aperture_mesh_ready(arrays: Array):
+## Signal callback for aperture_mesh_ready
+func _on_aperture_mesh_ready(arrays: Array) -> void:
 	print("Aperture mesh generated.")
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	mesh.surface_set_material(mesh.get_surface_count() - 1, aperture_material)
 
 
-func _on_beam_mesh_ready(arrays: Array):
+## Signal callback for beam_mesh_ready
+func _on_beam_mesh_ready(arrays: Array) -> void:
 	print("Beam mesh generated.")
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	mesh.surface_set_material(mesh.get_surface_count() - 1, beam_material)
 
 
-func _exit_tree():
+func _exit_tree() -> void:
 	if aperture_thread.is_started():
 		aperture_thread.wait_to_finish()
 	if beam_thread.is_started():
@@ -139,7 +145,7 @@ func _exit_tree():
 
 func _ready() -> void:
 	print("Loading survey data...")
-	var slices_data := _load_slices("res://Data/survey.csv")
+	var slices_data := _load_survey("res://Data/survey.csv")
 
 	aperture_mesh_ready.connect(_on_aperture_mesh_ready)
 	beam_mesh_ready.connect(_on_beam_mesh_ready)
@@ -174,12 +180,7 @@ func _ready() -> void:
 	OBJExporter.export_completed.connect(func (_obj, _mtl): print("Export complete!"))
 
 
-func _input(event: InputEvent) -> void:
-	if event is InputEventKey:
-		if event.keycode == KEY_M and event.pressed and not event.echo:
-			_export_mesh()
-
-
+## Creates a SurfaceTool and populates it with toroidal data, to be committed to an ArrayMesh or to arrays
 func _build_sweep_mesh(survey_data: Array[Dictionary], data_path: String, get_points_func: Callable) -> SurfaceTool:
 	print("Building mesh from %s..." % data_path)
 	
@@ -204,20 +205,25 @@ func _build_sweep_mesh(survey_data: Array[Dictionary], data_path: String, get_po
 
 	while not df.eof_reached():
 		var data_line := df.get_csv_line()
-		if data_line.size() < 5:
+		if len(data_line) < 5:
 			continue
 
 		var curr_slice := survey_data[aperture_index]
 		aperture_index += 1
 
-		# Get the 2D cross section points by calling the func
+		# Get the 2D cross-section points via callback
 		var points_2d: Array[Vector2] = get_points_func.call(data_line)
 		if points_2d.is_empty():
 			continue
 
-		# Construct frenet frame
+		# Here, we're essentially finding the rotation to angle our edge vertices by finding
+		# the direction from one slice to the next as our tangent, then getting its normal and 
+		# binormal. This lets us build our own Frenet frame, which we can then minimise the
+		# rotation on to prevent Frenet twist
 		var curr_center: Vector3 = curr_slice.center
 		var tangent: Vector3 = (curr_center - prev_slice.center) if has_prev else prev_tangent
+		
+		# To catch weird edge cases like two slices intersecting
 		if tangent.length_squared() < 1e-12:
 			tangent = prev_tangent
 
@@ -233,37 +239,32 @@ func _build_sweep_mesh(survey_data: Array[Dictionary], data_path: String, get_po
 
 		prev_tangent = tangent
 
-		# Build vertices in 3D space
+		# Build those vertices in 3D space
 		var curr_verts : Array[Vector3] = []
-		curr_verts.resize(points_2d.size())
-		for i in points_2d.size():
+		for i in len(points_2d):
 			var p2 := points_2d[i]
-			curr_verts[i] = curr_center + normal * p2.x + binormal * p2.y
+			curr_verts.append(curr_center + normal * p2.x + binormal * p2.y)
 
-		# Rotation minimisation
-		if has_prev and prev_verts.size() == curr_verts.size():
-			var num_verts = curr_verts.size()
-			var ref_prev = (prev_verts[0] - prev_slice.center).normalized()
-			var ref_curr = (curr_verts[0] - curr_center).normalized()
-			var tangent_dir: Vector3 = (curr_center - prev_slice.center).normalized()
-			if tangent_dir.length_squared() < 1e-12:
-				tangent_dir = prev_tangent.normalized()
+		# Stitching process. If we have a previous slice, then we minimise the rotation
+		# and stitch them together
+		if has_prev:
+			var num_verts := len(curr_verts)
+			var ref_prev: Vector3 = prev_verts[0] - prev_slice.center
+			var ref_curr: Vector3 = curr_verts[0] - curr_center
 
-			var dot_val   = clamp(ref_prev.dot(ref_curr), -1.0, 1.0)
-			var cross_val = tangent_dir.dot(ref_prev.cross(ref_curr))
+			var dot_val = clamp(ref_prev.dot(ref_curr), -1.0, 1.0)
+			var cross_val = tangent.dot(ref_prev.cross(ref_curr))
 			prev_angle_offset += atan2(cross_val, dot_val)
 
 			var index_shift := int(round(prev_angle_offset / (TAU / num_verts)))
-			var rotated_ring : Array[Vector3] = []
-			rotated_ring.resize(num_verts)
+			var rotated_ring: Array[Vector3] = []
 			for i in num_verts:
-				rotated_ring[i] = curr_verts[(i + index_shift) % num_verts]
+				rotated_ring.append(curr_verts[(i + index_shift) % num_verts])
+
 			curr_verts = rotated_ring
 
-		# Stitching
-		if has_prev and prev_verts.size() == curr_verts.size() and curr_verts.size() > 2:
-			for j in curr_verts.size():
-				var jn = (j + 1) % curr_verts.size()
+			for j in len(curr_verts):
+				var jn = (j + 1) % len(curr_verts)
 				st.add_vertex(prev_verts[j])
 				st.add_vertex(prev_verts[jn])
 				st.add_vertex(curr_verts[j])
@@ -282,3 +283,13 @@ func _build_sweep_mesh(survey_data: Array[Dictionary], data_path: String, get_po
 	st.generate_normals()
 	st.optimize_indices_for_cache()
 	return st
+
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey:
+		if event.keycode == KEY_M and event.pressed and not event.echo:
+			_export_mesh()
+
+
+func _export_mesh() -> void:
+	mesh_export_thread.start(OBJExporter.save_mesh_to_files.bind(mesh, "user://", "lhc_beam"))
