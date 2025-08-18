@@ -1,26 +1,17 @@
-[gd_scene load_steps=12 format=3 uid="uid://dhffc1wkr2bjd"]
+[gd_scene load_steps=13 format=3 uid="uid://dhffc1wkr2bjd"]
 
 [ext_resource type="Material" uid="uid://dxy24xgram2yh" path="res://Shaders/wireframe.tres" id="1_8gbba"]
 [ext_resource type="Script" uid="uid://db1ni4brf4at8" path="res://pipe.gd" id="1_jjgbg"]
 [ext_resource type="Shader" uid="uid://cvh6sfsfohh6f" path="res://Shaders/hatching.gdshader" id="1_jjvhh"]
 [ext_resource type="Script" uid="uid://dcsja3lej743x" path="res://Scenes/camera_3d.gd" id="2_bo1nx"]
+[ext_resource type="Texture2D" uid="uid://c3xnggoyrk44e" path="res://Assets/progress.png" id="5_kry3j"]
 
 [sub_resource type="ArrayMesh" id="ArrayMesh_jjvhh"]
 
-[sub_resource type="ShaderMaterial" id="ShaderMaterial_8gbba"]
-render_priority = 0
-shader = ExtResource("1_jjvhh")
-shader_parameter/rim = 0.0
-shader_parameter/rim_threshold = 0.0
-shader_parameter/emission = 0.4
-shader_parameter/specular = 0.0
-shader_parameter/specular_color = Color(0.5, 0.5, 0.5, 1)
-shader_parameter/roughness = 1.0
-shader_parameter/alpha = 0.2
-shader_parameter/is_normal_symmetric = true
-shader_parameter/normal_scale = 1.0
-shader_parameter/albedo_color = Color(0.792157, 0.72549, 0.737255, 0.239216)
-shader_parameter/albedo_color2 = Color(0.438406, 0.438406, 0.438406, 1)
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_kry3j"]
+transparency = 1
+cull_mode = 2
+vertex_color_use_as_albedo = true
 
 [sub_resource type="ShaderMaterial" id="ShaderMaterial_jjvhh"]
 render_priority = 0
@@ -64,7 +55,7 @@ transform = Transform3D(0.1, 0, 0, 0, 0.1, 0, 0, 0, 0.1, 0, 0, 0)
 cast_shadow = 0
 mesh = SubResource("ArrayMesh_jjvhh")
 script = ExtResource("1_jjgbg")
-aperture_material = SubResource("ShaderMaterial_8gbba")
+aperture_material = SubResource("StandardMaterial3D_kry3j")
 beam_material = SubResource("ShaderMaterial_jjvhh")
 
 [node name="Camera3D" type="Camera3D" parent="."]
@@ -75,3 +66,46 @@ script = ExtResource("2_bo1nx")
 [node name="TestSphere" type="MeshInstance3D" parent="."]
 visible = false
 mesh = SubResource("SphereMesh_jjvhh")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="."]
+anchors_preset = -1
+anchor_right = 0.217354
+anchor_bottom = 0.242556
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 15.68
+offset_bottom = 16.04
+theme_override_constants/separation = 0
+metadata/_edit_use_anchors_ = true
+
+[node name="HBoxContainer" type="HBoxContainer" parent="VBoxContainer"]
+layout_mode = 2
+
+[node name="Label" type="Label" parent="VBoxContainer/HBoxContainer"]
+layout_mode = 2
+text = "Generating aperture mesh..."
+
+[node name="ApertureProgress" type="TextureProgressBar" parent="VBoxContainer/HBoxContainer"]
+unique_name_in_owner = true
+layout_mode = 2
+fill_mode = 4
+nine_patch_stretch = true
+stretch_margin_left = 50
+stretch_margin_top = 50
+texture_progress = ExtResource("5_kry3j")
+
+[node name="HBoxContainer2" type="HBoxContainer" parent="VBoxContainer"]
+layout_mode = 2
+
+[node name="Label" type="Label" parent="VBoxContainer/HBoxContainer2"]
+layout_mode = 2
+text = "Generating beam mesh..."
+
+[node name="BeamProgress" type="TextureProgressBar" parent="VBoxContainer/HBoxContainer2"]
+unique_name_in_owner = true
+layout_mode = 2
+fill_mode = 4
+nine_patch_stretch = true
+stretch_margin_left = 50
+stretch_margin_top = 50
+texture_progress = ExtResource("5_kry3j")

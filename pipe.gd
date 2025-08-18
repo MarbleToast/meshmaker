@@ -3,18 +3,29 @@ extends MeshInstance3D
 @export var aperture_material: Material
 @export var beam_material: Material
 
-const APERTURE_THICKNESS_MODIFIER := 25
+@onready var aperture_progress_container := $"../VBoxContainer/HBoxContainer"
+@onready var beam_progress_container := $"../VBoxContainer/HBoxContainer2"
+@onready var aperture_progress := %ApertureProgress
+@onready var beam_progress := %BeamProgress
 
-const BEAM_FUDGED_EMITTANCE_X := 1e-8
-const BEAM_FUDGED_EMITTANCE_Y := 1e-8
-const BEAM_NUM_SIGMAS := 3
-const BEAM_SIGMA_DELTA := 8e-4
-const BEAM_ELLIPSE_RESOLUTION := 4
-const BEAM_THICKNESS_MODIFIER := 1
+# Aperture constants
+const APERTURE_TORUS_SCALE_FACTOR := 1 # Factor to multiply the scale of cross-section positions
+const APERTURE_THICKNESS_MODIFIER := 25 # Factor to multiply local cross-section vertices 
 
+# Beam constants
+const BEAM_FUDGED_EMITTANCE_X := 2.5e-6 / 16000 # Dummy factor for st.dev. in X to calculate beam width
+const BEAM_FUDGED_EMITTANCE_Y := 2.5e-6 / 16000 # Dummy factor for st.dev. in Y to calculate beam height
+const BEAM_NUM_SIGMAS := 3 # Number of standard deviations
+const BEAM_SIGMA_DELTA := 8e-4 # Honestly no clue, but it's in the calculation. Some scalar
+const BEAM_ELLIPSE_RESOLUTION := 10 # Number of vertices in each cross-section for beam
+const BEAM_THICKNESS_MODIFIER := 1 # Factor to multiply local cross-section vertices
+
+# Signals for coordinating threads
 signal aperture_mesh_ready(arrays: Array)
 signal beam_mesh_ready(arrays: Array)
 
+# Set up threads for mesh generation and exporting, so we don't have crazy loading times for
+# each of these in sequence
 var mesh_export_thread := Thread.new()
 var aperture_thread := Thread.new()
 var beam_thread := Thread.new()
@@ -38,13 +49,22 @@ func _python_list_to_godot_array(arr_str: String) -> Array:
 	return result
 
 
+func _element_type_to_colour(type: String) -> Color:
+	var hash := type.hash()
+	var r = float((hash >> 16) & 0xFF) / 255.0
+	var g = float((hash >> 8) & 0xFF) / 255.0
+	var b = float(hash & 0xFF) / 255.0
+	return Color(r, g, b, 0.3)
+
+
 ## Parses a line of aperture data from an Xsuite survey CSV
 func _parse_aperture_line(line: PackedStringArray) -> Dictionary:
 	if len(line) < 7:
 		return {}
 	return {
-		center = Vector3(float(line[1]), float(line[2]), float(line[3])),
+		center = Vector3(float(line[1]), float(line[2]), float(line[3])) * APERTURE_TORUS_SCALE_FACTOR,
 		psi = deg_to_rad(float(line[6])),
+		type = line[14]
 	}
 
 
@@ -125,6 +145,7 @@ func _on_aperture_mesh_ready(arrays: Array) -> void:
 	print("Aperture mesh generated.")
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	mesh.surface_set_material(mesh.get_surface_count() - 1, aperture_material)
+	_progress_success_animation(aperture_progress_container)
 
 
 ## Signal callback for beam_mesh_ready
@@ -132,6 +153,14 @@ func _on_beam_mesh_ready(arrays: Array) -> void:
 	print("Beam mesh generated.")
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	mesh.surface_set_material(mesh.get_surface_count() - 1, beam_material)
+	beam_progress.value = beam_progress.max_value
+	_progress_success_animation(beam_progress_container)
+
+
+func _progress_success_animation(container: Container) -> void:
+	container.modulate = Color.LIME_GREEN
+	await get_tree().create_tween().tween_property(container, "modulate", Color.TRANSPARENT, 2.0).finished
+	container.queue_free()
 
 
 func _exit_tree() -> void:
@@ -146,6 +175,8 @@ func _exit_tree() -> void:
 func _ready() -> void:
 	print("Loading survey data...")
 	var slices_data := _load_survey("res://Data/survey.csv")
+	aperture_progress.max_value = len(slices_data)
+	beam_progress.max_value = len(slices_data)
 
 	aperture_mesh_ready.connect(_on_aperture_mesh_ready)
 	beam_mesh_ready.connect(_on_beam_mesh_ready)
@@ -154,10 +185,14 @@ func _ready() -> void:
 		var arrays := _build_sweep_mesh(
 			slices_data, 
 			"res://Data/apertures.csv", 
+			
 			func (slice_line):
 				var data: Array[Vector2]
 				data.assign(_parse_edge_line(slice_line).map(func(v): return v * APERTURE_THICKNESS_MODIFIER))
-				return data
+				return data,
+				
+			func (progress: int):
+				aperture_progress.set_value.call_deferred(progress)
 		).commit_to_arrays()
 
 		aperture_mesh_ready.emit.call_deferred(arrays)
@@ -167,10 +202,14 @@ func _ready() -> void:
 		var arrays := _build_sweep_mesh(
 			slices_data, 
 			"res://Data/twiss.csv", 
+
 			func (twiss_line):
 				var data: Array[Vector2]
 				data.assign(_create_ellipse(_parse_twiss_line(twiss_line)).map(func(v): return v * BEAM_THICKNESS_MODIFIER))
-				return data
+				return data,
+
+			func (progress: int):
+				beam_progress.set_value.call_deferred(progress)
 		).commit_to_arrays()
 
 		beam_mesh_ready.emit.call_deferred(arrays)
@@ -181,7 +220,7 @@ func _ready() -> void:
 
 
 ## Creates a SurfaceTool and populates it with toroidal data, to be committed to an ArrayMesh or to arrays
-func _build_sweep_mesh(survey_data: Array[Dictionary], data_path: String, get_points_func: Callable) -> SurfaceTool:
+func _build_sweep_mesh(survey_data: Array[Dictionary], data_path: String, get_points_func: Callable, progress_callback: Callable = Callable()) -> SurfaceTool:
 	print("Building mesh from %s..." % data_path)
 	
 	var st := SurfaceTool.new()
@@ -202,6 +241,7 @@ func _build_sweep_mesh(survey_data: Array[Dictionary], data_path: String, get_po
 	var prev_tangent := Vector3.FORWARD
 	var prev_angle_offset := 0.0
 	var triangle_count := 0
+	var prev_type: String = survey_data[0].type
 
 	while not df.eof_reached():
 		var data_line := df.get_csv_line()
@@ -215,6 +255,9 @@ func _build_sweep_mesh(survey_data: Array[Dictionary], data_path: String, get_po
 		var points_2d: Array[Vector2] = get_points_func.call(data_line)
 		if points_2d.is_empty():
 			continue
+			
+		if prev_type != curr_slice.type:
+			st.set_color(_element_type_to_colour(curr_slice.type))
 
 		# Here, we're essentially finding the rotation to angle our edge vertices by finding
 		# the direction from one slice to the next as our tangent, then getting its normal and 
@@ -278,6 +321,8 @@ func _build_sweep_mesh(survey_data: Array[Dictionary], data_path: String, get_po
 		prev_slice = curr_slice
 		prev_verts = curr_verts
 		has_prev = true
+		
+		progress_callback.call(aperture_index)
 
 	st.index()
 	st.generate_normals()
@@ -291,5 +336,6 @@ func _input(event: InputEvent) -> void:
 			_export_mesh()
 
 
+## Export the mesh as 
 func _export_mesh() -> void:
 	mesh_export_thread.start(OBJExporter.save_mesh_to_files.bind(mesh, "user://", "lhc_beam"))
