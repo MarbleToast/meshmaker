@@ -1,4 +1,4 @@
-extends MeshInstance3D
+extends Node3D
 
 @export var aperture_material: Material
 @export var beam_material: Material
@@ -7,6 +7,7 @@ extends MeshInstance3D
 @onready var beam_progress_container := $"../VBoxContainer/HBoxContainer2"
 @onready var aperture_progress := %ApertureProgress
 @onready var beam_progress := %BeamProgress
+@onready var aperture_info := %ApertureInfo
 
 # Aperture constants
 const APERTURE_TORUS_SCALE_FACTOR := 1 # Factor to multiply the scale of cross-section positions
@@ -18,11 +19,12 @@ const BEAM_FUDGED_EMITTANCE_Y := 2.5e-6 / 16000 # Dummy factor for st.dev. in Y 
 const BEAM_NUM_SIGMAS := 3 # Number of standard deviations
 const BEAM_SIGMA_DELTA := 8e-4 # Honestly no clue, but it's in the calculation. Some scalar
 const BEAM_ELLIPSE_RESOLUTION := 10 # Number of vertices in each cross-section for beam
-const BEAM_THICKNESS_MODIFIER := 1 # Factor to multiply local cross-section vertices
+const BEAM_THICKNESS_MODIFIER := 0.1 # Factor to multiply local cross-section vertices
 
 # Signals for coordinating threads
-signal aperture_mesh_ready(arrays: Array)
-signal beam_mesh_ready(arrays: Array)
+signal aperture_mesh_ready(mesh_data: Dictionary)
+signal aperture_meshes_complete
+signal beam_mesh_ready(arrays: ArrayMesh)
 
 # Set up threads for mesh generation and exporting, so we don't have crazy loading times for
 # each of these in sequence
@@ -30,6 +32,17 @@ var mesh_export_thread := Thread.new()
 var aperture_thread := Thread.new()
 var beam_thread := Thread.new()
 
+# Store child MeshInstance3D nodes for different aperture segments
+var beam_mesh_instance: MeshInstance3D
+var aperture_mesh_instances: Array[MeshInstance3D] = []
+
+var selected_aperture_mesh: ElementMeshInstance:
+	set(value):
+		if selected_aperture_mesh:
+			selected_aperture_mesh.mesh.surface_get_material(0).emission_enabled = false
+		value.mesh.surface_get_material(0).emission_enabled = true
+		aperture_info.text = value.type
+		selected_aperture_mesh = value
 
 ## Converts a stringified Python list to a Godot array
 ##
@@ -49,16 +62,21 @@ func _python_list_to_godot_array(arr_str: String) -> Array:
 	return result
 
 
+var colour_map := {}
 func _element_type_to_colour(type: String) -> Color:
-	var hash := type.hash()
-	var r = float((hash >> 16) & 0xFF) / 255.0
-	var g = float((hash >> 8) & 0xFF) / 255.0
-	var b = float(hash & 0xFF) / 255.0
-	return Color(r, g, b, 0.3)
+	if type in colour_map:
+		return colour_map[type]
+	var h := type.hash()
+	var r = float((h >> 16) & 0xFF) / 255.0
+	var g = float((h >> 8) & 0xFF) / 255.0
+	var b = float(h & 0xFF) / 255.0
+	var colour := Color(r, g, b, 0.3)
+	colour_map[type] = colour
+	return colour
 
 
 ## Parses a line of aperture data from an Xsuite survey CSV
-func _parse_aperture_line(line: PackedStringArray) -> Dictionary:
+func _parse_survey_line(line: PackedStringArray) -> Dictionary:
 	if len(line) < 7:
 		return {}
 	return {
@@ -80,20 +98,6 @@ func _parse_twiss_line(line: PackedStringArray) -> Dictionary:
 			BEAM_SIGMA_DELTA * BEAM_NUM_SIGMAS * sqrt(BEAM_FUDGED_EMITTANCE_Y * float(line[18])) + absf(float(line[25]))
 		)
 	}
-
-
-## Creates an ellipse from a parsed twiss line, with width and height according to sigma in x and y
-func _create_ellipse(twiss: Dictionary) -> Array[Vector2]:
-	var pts: Array[Vector2] = []
-	var center: Vector2 = twiss.position
-	var sigma: Vector2 = twiss.sigma
-	var step := TAU / float(BEAM_ELLIPSE_RESOLUTION)
-	
-	for i in BEAM_ELLIPSE_RESOLUTION:
-		var angle := i * step
-		pts.append(center + Vector2(cos(angle) * sigma.x, sin(angle) * sigma.y))
-
-	return pts
 
 
 ## Parses a line of aperture vertex data from an Xsuite apertures CSV
@@ -120,6 +124,7 @@ func _parse_edge_line(line: PackedStringArray) -> Array[Vector2]:
 
 # Reads and parses all lines from an Xsuite survey file, discarding non-usable lines
 func _load_survey(survey_path: String) -> Array[Dictionary]:
+	print("Loading survey data...")
 	var sf := FileAccess.open(survey_path, FileAccess.READ)
 	
 	# Skip header
@@ -131,28 +136,142 @@ func _load_survey(survey_path: String) -> Array[Dictionary]:
 		if len(slice_line) < 5:
 			continue
 			
-		var curr_slice := _parse_aperture_line(slice_line)
+		var curr_slice := _parse_survey_line(slice_line)
 		if curr_slice.is_empty():
 			continue
 			
 		apertures.append(curr_slice)
 	
+	print("Got %s apertures." % apertures.size())
 	return apertures
 
 
-## Signal callback for aperture_mesh_ready
-func _on_aperture_mesh_ready(arrays: Array) -> void:
-	print("Aperture mesh generated.")
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	mesh.surface_set_material(mesh.get_surface_count() - 1, aperture_material)
+## Loads all lines from an Xsuite aperture file into an array
+## 
+## We need to have all lines because _parse_edge_line() discards lines without vertex data,
+## meaning we would drop out of sync with the survey file when creating aperture segments 
+func _load_aperture_edge_lines(edges_path: String) -> Array[PackedStringArray]:
+	print("Loading edge data...")
+	var ef := FileAccess.open(edges_path, FileAccess.READ)
+
+	# Skip header
+	ef.get_csv_line()
+	
+	var edges: Array[PackedStringArray] = []
+	while not ef.eof_reached():
+		var edges_line := ef.get_csv_line()
+		if len(edges_line) < 5:
+			continue
+		edges.append(edges_line)
+	
+	print("Got %s aperture edges." % edges.size())
+	return edges
+
+
+## Builds segments of consecutive survey slices of the same type
+func _build_aperture_segments(survey_data: Array[Dictionary], edges_data: Array[PackedStringArray]) -> Array[Dictionary]:
+	print("Building segments...")
+	var segments: Array[Dictionary] = []
+	var current_type := ""
+	var current_segment := {
+		type = "", 
+		survey = [], 
+		edges = [] 
+	}
+
+	for i in survey_data.size():
+		var slice := survey_data[i]
+		if slice.type != current_type:
+			# Push previous segment if it's not the first line
+			if current_segment.survey.size() > 0:
+				segments.append(current_segment)
+				
+			# Start new segment
+			current_type = slice.type
+			current_segment = {
+				type = current_type, 
+				survey = [], 
+				edges = [] 
+			}
+		
+		var parsed_edges := _parse_edge_line(edges_data[i])
+		if len(parsed_edges) == 0:
+			continue
+			
+		current_segment.survey.append(slice)
+		current_segment.edges.append(parsed_edges)
+
+	# push last
+	if current_segment.survey.size() > 0:
+		segments.append(current_segment)
+
+	return segments
+
+
+## Creates an ellipse from a parsed twiss line, with width and height according to sigma in x and y
+func _create_ellipse(twiss: Dictionary) -> Array[Vector2]:
+	var pts: Array[Vector2] = []
+	var center: Vector2 = twiss.position
+	var sigma: Vector2 = twiss.sigma
+	var step := TAU / float(BEAM_ELLIPSE_RESOLUTION)
+	
+	for i in BEAM_ELLIPSE_RESOLUTION:
+		var angle := i * step
+		pts.append(center + Vector2(cos(angle) * sigma.x, sin(angle) * sigma.y))
+
+	return pts
+
+
+## Signal callback for aperture_meshes_ready - now handles multiple segment meshes
+func _on_aperture_mesh_ready(mesh_data: Dictionary) -> void:
+	var aperture_type: String = mesh_data.type
+	var array_mesh: ArrayMesh = mesh_data.arrays
+	var segment_index: int = mesh_data.segment_index
+	
+	var mesh_instance := ElementMeshInstance.new()
+	mesh_instance.name = "Aperture_Segment_%d_%s" % [segment_index, aperture_type]
+	array_mesh.surface_set_material(0, aperture_material.duplicate())
+	mesh_instance.mesh = array_mesh
+	mesh_instance.type = aperture_type
+	
+	var static_body := StaticBody3D.new()
+	static_body.input_event.connect(_on_aperture_mesh_clicked.bind(mesh_instance))
+	
+	var collision_shape := CollisionShape3D.new()
+	collision_shape.shape = array_mesh.create_convex_shape()
+	
+	aperture_mesh_instances.append(mesh_instance)
+	static_body.add_child(mesh_instance)
+	static_body.add_child(collision_shape)
+	add_child(static_body)
+
+
+func _on_aperture_meshes_complete() -> void:
 	_progress_success_animation(aperture_progress_container)
 
 
+func _on_aperture_mesh_clicked(
+	camera: Node, 
+	event: InputEvent, 
+	event_position: Vector3, 
+	normal: Vector3, 
+	shape_index: int, 
+	caller: ElementMeshInstance
+) -> void:
+	if event is InputEventMouseButton:
+		if event.button_index == MOUSE_BUTTON_LEFT and event.pressed:
+			selected_aperture_mesh = caller
+
+
 ## Signal callback for beam_mesh_ready
-func _on_beam_mesh_ready(arrays: Array) -> void:
+func _on_beam_mesh_ready(arrmesh: ArrayMesh) -> void:
 	print("Beam mesh generated.")
-	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-	mesh.surface_set_material(mesh.get_surface_count() - 1, beam_material)
+	beam_mesh_instance = MeshInstance3D.new()
+	beam_mesh_instance.name = "Twiss"
+	add_child(beam_mesh_instance)
+	
+	arrmesh.surface_set_material(0, beam_material)
+	beam_mesh_instance.mesh = arrmesh
 	beam_progress.value = beam_progress.max_value
 	_progress_success_animation(beam_progress_container)
 
@@ -173,34 +292,29 @@ func _exit_tree() -> void:
 
 
 func _ready() -> void:
-	print("Loading survey data...")
-	var slices_data := _load_survey("res://Data/survey.csv")
-	aperture_progress.max_value = len(slices_data)
-	beam_progress.max_value = len(slices_data)
+	var survey_data := _load_survey("res://Data/survey.csv")
+	var edges_lines := _load_aperture_edge_lines("res://Data/apertures.csv")
+	var aperture_segments := _build_aperture_segments(survey_data, edges_lines)
+	
+	aperture_progress.max_value = aperture_segments.size()
+	beam_progress.max_value = survey_data.size()
 
 	aperture_mesh_ready.connect(_on_aperture_mesh_ready)
+	aperture_meshes_complete.connect(_on_aperture_meshes_complete)
 	beam_mesh_ready.connect(_on_beam_mesh_ready)
 	
 	aperture_thread.start(func ():
-		var arrays := _build_sweep_mesh(
-			slices_data, 
-			"res://Data/apertures.csv", 
-			
-			func (slice_line):
-				var data: Array[Vector2]
-				data.assign(_parse_edge_line(slice_line).map(func(v): return v * APERTURE_THICKNESS_MODIFIER))
-				return data,
-				
+		_build_multiple_segmented_sweep_meshes(
+			aperture_segments,
 			func (progress: int):
 				aperture_progress.set_value.call_deferred(progress)
-		).commit_to_arrays()
-
-		aperture_mesh_ready.emit.call_deferred(arrays)
+		)
+		aperture_meshes_complete.emit.call_deferred()
 	)
 	
 	beam_thread.start(func ():
 		var arrays := _build_sweep_mesh(
-			slices_data, 
+			survey_data, 
 			"res://Data/twiss.csv", 
 
 			func (twiss_line):
@@ -210,7 +324,7 @@ func _ready() -> void:
 
 			func (progress: int):
 				beam_progress.set_value.call_deferred(progress)
-		).commit_to_arrays()
+		)
 
 		beam_mesh_ready.emit.call_deferred(arrays)
 	)
@@ -219,8 +333,107 @@ func _ready() -> void:
 	OBJExporter.export_completed.connect(func (_obj, _mtl): print("Export complete!"))
 
 
+##  Creates separate meshes for each aperture segment
+func _build_multiple_segmented_sweep_meshes(segments: Array[Dictionary], progress_callback: Callable = Callable()) -> void:
+	print("Building segmented meshes...")
+	
+	# Keep track of the last processed slice and its verts (across all segments)
+	var prev_slice := {}
+	var prev_verts: Array[Vector3] = []
+	var prev_tangent := Vector3.FORWARD
+	var prev_angle_offset := 0.0
+	var has_prev := false
+	
+	for segment_index in range(segments.size()):
+		var segment = segments[segment_index]
+		var slices_data: Array = segment.survey
+		var edges_data: Array = segment.edges
+		var segment_type: String = segment.type
+		
+		var st := SurfaceTool.new()
+		st.begin(Mesh.PRIMITIVE_TRIANGLES)
+		st.set_color(_element_type_to_colour(segment_type))
+		
+		# Process each slice normally
+		for s in range(slices_data.size()):
+			var curr_slice: Dictionary = slices_data[s]
+			var edge_ring: Array[Vector2] = edges_data[s]
+			
+			# ---- build Frenet frame ----
+			var curr_center: Vector3 = curr_slice.center
+			var tangent: Vector3 = (curr_center - prev_slice.center) if has_prev else prev_tangent
+			if tangent.length_squared() < 1e-12:
+				tangent = prev_tangent
+			
+			var up := Vector3.UP
+			if abs(tangent.dot(up)) > 0.9:
+				up = Vector3.RIGHT
+			
+			var normal := (up - tangent * up.dot(tangent)).normalized()
+			var binormal := tangent.cross(normal).normalized()
+			if abs(curr_slice.psi) > 1e-6:
+				normal  = normal.rotated(tangent, curr_slice.psi)
+				binormal = binormal.rotated(tangent, curr_slice.psi)
+			
+			prev_tangent = tangent
+			
+			# ---- build verts ----
+			var curr_verts: Array[Vector3] = []
+			for p2 in edge_ring:
+				var scaled := p2 * APERTURE_THICKNESS_MODIFIER
+				curr_verts.append(curr_center + normal * scaled.x + binormal * scaled.y)
+			
+			# ---- stitch if we have a previous ring ----
+			if has_prev and prev_verts.size() == curr_verts.size():
+				var n := curr_verts.size()
+				var ref_prev: Vector3 = prev_verts[0] - prev_slice.center
+				var ref_curr := curr_verts[0] - curr_center
+				var dot_val: float = clamp(ref_prev.dot(ref_curr), -1.0, 1.0)
+				var cross_val := tangent.dot(ref_prev.cross(ref_curr))
+				prev_angle_offset += atan2(cross_val, dot_val)
+				
+				var shift := int(round(prev_angle_offset / (TAU / float(n))))
+				var rotated: Array[Vector3] = []
+				for i in range(n):
+					rotated.append(curr_verts[(i + shift) % n])
+				curr_verts = rotated
+				
+				for j in range(n):
+					var jn = (j + 1) % n
+					st.add_vertex(prev_verts[j])
+					st.add_vertex(prev_verts[jn])
+					st.add_vertex(curr_verts[j])
+					
+					st.add_vertex(prev_verts[jn])
+					st.add_vertex(curr_verts[jn])
+					st.add_vertex(curr_verts[j])
+			
+			prev_slice = curr_slice
+			prev_verts = curr_verts
+			has_prev = true
+			
+			prev_slice = curr_slice
+			prev_verts = curr_verts
+			prev_tangent = tangent
+			
+		progress_callback.call(segment_index)
+
+		# finalize surface for this segment
+		st.index()
+		st.generate_normals()
+		st.optimize_indices_for_cache()
+		
+		aperture_mesh_ready.emit.call_deferred({
+			type = segment_type,
+			arrays = st.commit(),
+			segment_index = segment_index
+		})
+	
+	print("Aperture mesh generation complete.")
+
+
 ## Creates a SurfaceTool and populates it with toroidal data, to be committed to an ArrayMesh or to arrays
-func _build_sweep_mesh(survey_data: Array[Dictionary], data_path: String, get_points_func: Callable, progress_callback: Callable = Callable()) -> SurfaceTool:
+func _build_sweep_mesh(survey_data: Array[Dictionary], data_path: String, get_points_func: Callable, progress_callback: Callable = Callable()) -> ArrayMesh:
 	print("Building mesh from %s..." % data_path)
 	
 	var st := SurfaceTool.new()
@@ -229,7 +442,7 @@ func _build_sweep_mesh(survey_data: Array[Dictionary], data_path: String, get_po
 	var df := FileAccess.open(data_path, FileAccess.READ)
 	if df == null:
 		push_error("Could not open data CSV file.")
-		return st
+		return ArrayMesh.new()
 		
 	# Skip headers
 	df.get_csv_line()
@@ -327,7 +540,7 @@ func _build_sweep_mesh(survey_data: Array[Dictionary], data_path: String, get_po
 	st.index()
 	st.generate_normals()
 	st.optimize_indices_for_cache()
-	return st
+	return st.commit()
 
 
 func _input(event: InputEvent) -> void:
@@ -336,6 +549,12 @@ func _input(event: InputEvent) -> void:
 			_export_mesh()
 
 
-## Export the mesh as 
+## Export all meshes
 func _export_mesh() -> void:
-	mesh_export_thread.start(OBJExporter.save_mesh_to_files.bind(mesh, "user://", "lhc_beam"))
+	mesh_export_thread.start(func():
+		if beam_mesh_instance:
+			OBJExporter.save_mesh_to_files(beam_mesh_instance.mesh, "user://", "mesh_export_beam")
+		for inst in aperture_mesh_instances:
+			if inst.mesh:
+				OBJExporter.save_mesh_to_files(inst.mesh, "user://", "mesh_export_%s" % inst.name)
+	)

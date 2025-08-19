@@ -36,6 +36,9 @@ func _input(event):
 	# Receives mouse button input
 	if event is InputEventMouseButton:
 		match event.button_index:
+			MOUSE_BUTTON_LEFT:
+				if event.pressed:
+					_do_vertex_colour_pick()
 			MOUSE_BUTTON_RIGHT: # Only allows rotation if right click down
 				Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED if event.pressed else Input.MOUSE_MODE_VISIBLE)
 			MOUSE_BUTTON_WHEEL_UP: # Increases max velocity
@@ -58,6 +61,16 @@ func _input(event):
 				_q = event.pressed
 			KEY_E:
 				_e = event.pressed
+
+
+func _do_vertex_colour_pick() -> void:
+	var mouse_pos := get_viewport().get_mouse_position()
+	var space_state = get_world_3d().direct_space_state
+	
+	var params := PhysicsRayQueryParameters3D.new()
+	params.from = project_ray_origin(mouse_pos)
+	params.to = params.from + project_ray_normal(mouse_pos) * 1000.0
+	var result = space_state.intersect_ray(params)
 
 
 # Updates mouselook and movement every frame

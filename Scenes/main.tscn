@@ -1,32 +1,18 @@
-[gd_scene load_steps=13 format=3 uid="uid://dhffc1wkr2bjd"]
+[gd_scene load_steps=9 format=3 uid="uid://dhffc1wkr2bjd"]
 
-[ext_resource type="Material" uid="uid://dxy24xgram2yh" path="res://Shaders/wireframe.tres" id="1_8gbba"]
 [ext_resource type="Script" uid="uid://db1ni4brf4at8" path="res://pipe.gd" id="1_jjgbg"]
-[ext_resource type="Shader" uid="uid://cvh6sfsfohh6f" path="res://Shaders/hatching.gdshader" id="1_jjvhh"]
 [ext_resource type="Script" uid="uid://dcsja3lej743x" path="res://Scenes/camera_3d.gd" id="2_bo1nx"]
 [ext_resource type="Texture2D" uid="uid://c3xnggoyrk44e" path="res://Assets/progress.png" id="5_kry3j"]
 
-[sub_resource type="ArrayMesh" id="ArrayMesh_jjvhh"]
-
-[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_kry3j"]
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_jjvhh"]
+resource_local_to_scene = true
 transparency = 1
 cull_mode = 2
 vertex_color_use_as_albedo = true
+emission = Color(0.707967, 0.707967, 0.707967, 1)
 
-[sub_resource type="ShaderMaterial" id="ShaderMaterial_jjvhh"]
-render_priority = 0
-shader = ExtResource("1_jjvhh")
-shader_parameter/rim = 0.0
-shader_parameter/rim_threshold = 0.0
-shader_parameter/emission = 0.4
-shader_parameter/specular = 0.0
-shader_parameter/specular_color = Color(0.5, 0.5, 0.5, 1)
-shader_parameter/roughness = 1.0
-shader_parameter/alpha = 0.4
-shader_parameter/is_normal_symmetric = true
-shader_parameter/normal_scale = 1.0
-shader_parameter/albedo_color = Color(0.973134, 0, 0.158268, 0.239216)
-shader_parameter/albedo_color2 = Color(0.773692, 0.177081, 0.248177, 1)
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_8gbba"]
+albedo_color = Color(1, 0, 1, 1)
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_jjvhh"]
 sky_top_color = Color(0.182934, 0.441454, 0.492471, 1)
@@ -45,27 +31,17 @@ sky = SubResource("Sky_kry3j")
 ambient_light_source = 3
 tonemap_mode = 2
 
-[sub_resource type="SphereMesh" id="SphereMesh_jjvhh"]
-material = ExtResource("1_8gbba")
+[node name="Scene" type="Node3D"]
 
-[node name="Node3D" type="Node3D"]
-
-[node name="BeamPipe" type="MeshInstance3D" parent="."]
-transform = Transform3D(0.1, 0, 0, 0, 0.1, 0, 0, 0, 0.1, 0, 0, 0)
-cast_shadow = 0
-mesh = SubResource("ArrayMesh_jjvhh")
+[node name="MeshManager" type="Node3D" parent="."]
 script = ExtResource("1_jjgbg")
-aperture_material = SubResource("StandardMaterial3D_kry3j")
-beam_material = SubResource("ShaderMaterial_jjvhh")
+aperture_material = SubResource("StandardMaterial3D_jjvhh")
+beam_material = SubResource("StandardMaterial3D_8gbba")
 
 [node name="Camera3D" type="Camera3D" parent="."]
 transform = Transform3D(-4.37114e-08, 0, 1, 0, 1, 0, -1, 0, -4.37114e-08, 1, 0, 0)
 environment = SubResource("Environment_8gbba")
 script = ExtResource("2_bo1nx")
-
-[node name="TestSphere" type="MeshInstance3D" parent="."]
-visible = false
-mesh = SubResource("SphereMesh_jjvhh")
 
 [node name="VBoxContainer" type="VBoxContainer" parent="."]
 anchors_preset = -1
@@ -77,6 +53,22 @@ offset_right = 15.68
 offset_bottom = 16.04
 theme_override_constants/separation = 0
 metadata/_edit_use_anchors_ = true
+
+[node name="HBoxContainer2" type="HBoxContainer" parent="VBoxContainer"]
+layout_mode = 2
+
+[node name="Label" type="Label" parent="VBoxContainer/HBoxContainer2"]
+layout_mode = 2
+text = "Generating beam mesh..."
+
+[node name="BeamProgress" type="TextureProgressBar" parent="VBoxContainer/HBoxContainer2"]
+unique_name_in_owner = true
+layout_mode = 2
+fill_mode = 4
+nine_patch_stretch = true
+stretch_margin_left = 50
+stretch_margin_top = 50
+texture_progress = ExtResource("5_kry3j")
 
 [node name="HBoxContainer" type="HBoxContainer" parent="VBoxContainer"]
 layout_mode = 2
@@ -94,18 +86,15 @@ stretch_margin_left = 50
 stretch_margin_top = 50
 texture_progress = ExtResource("5_kry3j")
 
-[node name="HBoxContainer2" type="HBoxContainer" parent="VBoxContainer"]
-layout_mode = 2
-
-[node name="Label" type="Label" parent="VBoxContainer/HBoxContainer2"]
-layout_mode = 2
-text = "Generating beam mesh..."
-
-[node name="BeamProgress" type="TextureProgressBar" parent="VBoxContainer/HBoxContainer2"]
+[node name="ApertureInfo" type="Label" parent="."]
 unique_name_in_owner = true
-layout_mode = 2
-fill_mode = 4
-nine_patch_stretch = true
-stretch_margin_left = 50
-stretch_margin_top = 50
-texture_progress = ExtResource("5_kry3j")
+anchors_preset = -1
+anchor_left = 0.826
+anchor_top = 0.012
+anchor_right = 0.992
+anchor_bottom = 0.159
+offset_left = -0.920044
+offset_top = 0.04
+offset_right = -0.640137
+offset_bottom = 0.279984
+metadata/_edit_use_anchors_ = true
